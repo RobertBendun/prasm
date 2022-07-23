@@ -2,3 +2,4 @@
 *.nasm
 *.out
 venv
+.~lock*

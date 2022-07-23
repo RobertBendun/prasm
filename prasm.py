@@ -7,6 +7,7 @@ import struct
 import platform
 import shlex
 import subprocess
+import textwrap
 
 Page_Attribute = ('urn:oasis:names:tc:opendocument:xmlns:drawing:1.0', 'name')
 Class_Attribute = ('urn:oasis:names:tc:opendocument:xmlns:presentation:1.0', 'class')
@@ -23,27 +24,75 @@ Target = { "Darwin": f"macho", "Windows": f"win" }.get(platform.system(), "elf")
 Exe_Suffix = ".exe" if platform.system() == "Windows" else ".out"
 
 def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: str):
+    labels = {}
+    current_label = ""
+    order = []
+
+    def append(line: str):
+        if current_label in labels:
+            labels[current_label] += "\n" + line
+        else:
+            labels[current_label] = line
+
+    # with open(assembly, 'w') as out:
+    pres = load(source)
+
+
+    for page in pres.getElementsByType(text.P):
+        if not match_parent_node(page, tag_name='draw:page') or match_parent_node(page, attribute=(Page_Attribute, 'page1')):
+            continue
+
+        page_text = teletype.extractText(page)
+
+        if match_parent_node(page, 'text:list-item'):
+            # This are regular list nodes
+            append(page_text.lower())
+
+        if match_parent_node(page, attribute=(Class_Attribute, 'title')):
+            # This are titles
+            current_label = mangle_label(page_text)
+            if current_label not in order:
+                order.append(current_label)
+
+        if match_parent_node(page, 'text:list-header'):
+            append(to_binary(page_text))
+
     with open(assembly, 'w') as out:
-        pres = load(source)
-
-        print(f"BITS {Bits}",  file=out)
-        print("segment .text", file=out)
-        print("global _start", file=out)
-
-        for page in pres.getElementsByType(text.P):
-            if not match_parent_node(page, tag_name='draw:page') or match_parent_node(page, attribute=(Page_Attribute, 'page1')):
-                continue
-
-            if match_parent_node(page, 'text:list-item'):
-                # This are regular list nodes
-                print(teletype.extractText(page).lower(), file=out)
-
-            if match_parent_node(page, attribute=(Class_Attribute, 'title')):
-                # This are titles
-                print(mangle_label(teletype.extractText(page)), file=out)
+        print("BITS 64\nglobal _start", file=out)
+        for label in order:
+            print(label, file=out)
+            print(labels[label], file=out)
 
     cmd(nasm, "-f", Target, "-o", object, assembly)
     cmd(ld, "-o", output, object)
+
+def to_binary(s: str) -> str:
+    return 'db ' + ','.join(map(hex, bytes(s, 'utf8')))
+
+
+def dump_parents(source: str):
+    pres = load(source)
+    for page in pres.getElementsByType(text.P):
+        if not match_parent_node(page, tag_name='draw:page') or match_parent_node(page, attribute=(Page_Attribute, 'page1')):
+            continue
+
+        print(50 * "-")
+        print("Parents dump")
+        print(50 * "-")
+
+        for p in iterate_parents(page):
+            print("Tag: ", p.tagName)
+            print("Attr:", p.attributes)
+            print("Text:", teletype.extractText(p))
+            print()
+
+def dump_paths(source: str):
+    pres = load(source)
+    for page in pres.getElementsByType(text.P):
+        if not match_parent_node(page, tag_name='draw:page') or match_parent_node(page, attribute=(Page_Attribute, 'page1')):
+            continue
+        print("Text:", page)
+        print("Path:", get_path_of(page))
 
 def mangle_label(label: str) -> str:
     return label + ":"
@@ -77,17 +126,6 @@ def get_path_of(node: Element):
     "Returns path of element based on parent nodes"
     return ' / '.join(node.tagName for node in reversed(list(iterate_parents(node))))
 
-def parents_dump(node: Element):
-    print(50 * "-")
-    print("Parents dump")
-    print(50 * "-")
-
-    for p in iterate_parents(node):
-        print("Tag: ", p.tagName)
-        print("Attr:", p.attributes)
-        print("Text:", teletype.extractText(p))
-        print()
-
 def cmd(*command: str, **kwargs) -> subprocess.CompletedProcess:
     if Verbose:
         print("[CMD] %s" % " ".join(map(shlex.quote, command)))
@@ -106,6 +144,8 @@ if __name__ == "__main__":
     parser.add_argument("--tmpasm", help="Path for intermidiate assembly output", dest="assembly")
     parser.add_argument("--tmpobj", help="Path for intermidiate object file", dest="object")
     parser.add_argument("-V", "--verbose", help="Print all info", action="store_true")
+    parser.add_argument("--dump-parents", help="Dump all parents of text nodes in presentation", action="store_true", dest="dump_parents")
+    parser.add_argument("--dump-paths", help="Dump all parents of text nodes in presentation", action="store_true", dest="dump_paths")
     args = parser.parse_args()
 
     if args.output   is None: args.output   = replace_extension(args.source, Exe_Suffix)
@@ -115,4 +155,9 @@ if __name__ == "__main__":
     if args.ld       is None: args.ld       = "ld"
     Verbose = args.verbose
 
-    main(**dict(k for k in vars(args).items() if k[0] not in ['verbose'] ))
+    if args.dump_parents:
+        dump_parents(source=args.source)
+    elif args.dump_paths:
+        dump_paths(source=args.source)
+    else:
+        main(**dict(k for k in vars(args).items() if k[0] not in ['verbose', 'dump_parents', 'dump_paths'] ))
