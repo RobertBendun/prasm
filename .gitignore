@@ -1,0 +1,4 @@
+*.o
+*.nasm
+*.out
+venv
