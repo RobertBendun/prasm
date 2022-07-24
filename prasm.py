@@ -7,7 +7,7 @@ import struct
 import platform
 import shlex
 import subprocess
-import textwrap
+import sys
 
 Page_Attribute = ('urn:oasis:names:tc:opendocument:xmlns:drawing:1.0', 'name')
 Class_Attribute = ('urn:oasis:names:tc:opendocument:xmlns:presentation:1.0', 'class')
@@ -25,6 +25,7 @@ Exe_Suffix = ".exe" if platform.system() == "Windows" else ".out"
 
 def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: str):
     labels = {}
+    mangled_label_to_original = {}
     current_label = ""
     order = []
 
@@ -37,7 +38,6 @@ def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: st
     # with open(assembly, 'w') as out:
     pres = load(source)
 
-
     for page in pres.getElementsByType(text.P):
         if not match_parent_node(page, tag_name='draw:page') or match_parent_node(page, attribute=(Page_Attribute, 'page1')):
             continue
@@ -46,29 +46,35 @@ def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: st
 
         if match_parent_node(page, 'text:list-item'):
             # This are regular list nodes
+            verbose(f"Adding regular node '{page_text.lower()}' to label '{current_label}'")
             append(page_text.lower())
 
         if match_parent_node(page, attribute=(Class_Attribute, 'title')):
             # This are titles
+            verbose(f"Setting current label to '{current_label}'")
             current_label = mangle_label(page_text)
             if current_label not in order:
                 order.append(current_label)
+                mangled_label_to_original[current_label] = page_text
 
-        if match_parent_node(page, 'text:list-header'):
+        if match_parent_node(page, 'draw:custom-shape'):
+            verbose(f"Appending binary data to label {current_label}")
             append(to_binary(page_text))
 
     with open(assembly, 'w') as out:
         print("BITS 64\nglobal _start", file=out)
         for label in order:
-            print(label, file=out)
-            print(labels[label], file=out)
+            if label in labels:
+                print(label, file=out)
+                print(labels[label], file=out)
+            else:
+                print(f"[WARNING] Empty label '{mangled_label_to_original[label]}'")
 
     cmd(nasm, "-f", Target, "-o", object, assembly)
     cmd(ld, "-o", output, object)
 
 def to_binary(s: str) -> str:
     return 'db ' + ','.join(map(hex, bytes(s, 'utf8')))
-
 
 def dump_parents(source: str):
     pres = load(source)
@@ -129,7 +135,14 @@ def get_path_of(node: Element):
 def cmd(*command: str, **kwargs) -> subprocess.CompletedProcess:
     if Verbose:
         print("[CMD] %s" % " ".join(map(shlex.quote, command)))
+
+    sys.stdout.flush()
+    sys.stderr.flush()
     return subprocess.run(command, **kwargs)
+
+def verbose(*args, **kwargs):
+    if Verbose:
+        print("[INFO]", *args, **kwargs)
 
 def replace_extension(p: str, ext: str) -> str:
     return f"{os.path.splitext(p)[0]}{ext}"
@@ -146,6 +159,7 @@ if __name__ == "__main__":
     parser.add_argument("-V", "--verbose", help="Print all info", action="store_true")
     parser.add_argument("--dump-parents", help="Dump all parents of text nodes in presentation", action="store_true", dest="dump_parents")
     parser.add_argument("--dump-paths", help="Dump all parents of text nodes in presentation", action="store_true", dest="dump_paths")
+    parser.add_argument("--run", help="Run executable after assembling", action="store_true")
     args = parser.parse_args()
 
     if args.output   is None: args.output   = replace_extension(args.source, Exe_Suffix)
@@ -160,4 +174,8 @@ if __name__ == "__main__":
     elif args.dump_paths:
         dump_paths(source=args.source)
     else:
-        main(**dict(k for k in vars(args).items() if k[0] not in ['verbose', 'dump_parents', 'dump_paths'] ))
+        main(**dict(k for k in vars(args).items() if k[0] not in ['verbose', 'dump_parents', 'dump_paths', 'run'] ))
+        if args.run:
+            if not os.path.isabs(args.output):
+                args.output = os.path.join(".", args.output)
+            cmd(args.output)
