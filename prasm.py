@@ -3,9 +3,10 @@ from odf.opendocument import load
 from odf import text, teletype
 from odf.element import Element
 import os.path
-import struct
 import platform
 import shlex
+import shutil
+import struct
 import subprocess
 import sys
 
@@ -23,7 +24,7 @@ if Bits not in [32, 64]:
 Target = { "Darwin": f"macho", "Windows": f"win" }.get(platform.system(), "elf") + str(Bits)
 Exe_Suffix = ".exe" if platform.system() == "Windows" else ".out"
 
-def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: str):
+def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: str, no_prelude: bool, prelude: str):
     labels = {}
     mangled_label_to_original = {}
     current_label = ""
@@ -35,7 +36,6 @@ def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: st
         else:
             labels[current_label] = line
 
-    # with open(assembly, 'w') as out:
     pres = load(source)
 
     for page in pres.getElementsByType(text.P):
@@ -63,12 +63,16 @@ def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: st
 
     with open(assembly, 'w') as out:
         print("BITS 64\nglobal _start", file=out)
+
+        if not no_prelude:
+            with open(prelude, "r") as p:
+                shutil.copyfileobj(p, out)
+
         for label in order:
             if label in labels:
-                print(label, file=out)
-                print(labels[label], file=out)
+                print(f"{label}:\n{labels[label]}\n{label}$end equ $-{label}", file=out)
             else:
-                print(f"[WARNING] Empty label '{mangled_label_to_original[label]}'")
+                print(f"[WARNING] Skipping empty label '{mangled_label_to_original[label]}'")
 
     cmd(nasm, "-f", Target, "-o", object, assembly)
     cmd(ld, "-o", output, object)
@@ -101,7 +105,7 @@ def dump_paths(source: str):
         print("Path:", get_path_of(page))
 
 def mangle_label(label: str) -> str:
-    return label + ":"
+    return label
 
 def iterate_parents(node: Element):
     while node.parentNode:
@@ -151,15 +155,17 @@ if __name__ == "__main__":
     from argparse import ArgumentParser
     parser = ArgumentParser(description="Assembler of PRASM assembly language")
     parser.add_argument("source", help="Source file that will be assembled")
-    parser.add_argument("--output", "-o", help="Target assembly file")
-    parser.add_argument("--nasm", help="Path to NASM")
-    parser.add_argument("--linker", help="Path to linker", dest="ld")
-    parser.add_argument("--tmpasm", help="Path for intermidiate assembly output", dest="assembly")
-    parser.add_argument("--tmpobj", help="Path for intermidiate object file", dest="object")
+    parser.add_argument("--output", "-o", help="Target assembly file", metavar="PATH")
+    parser.add_argument("--nasm", help="Path to NASM", metavar="PATH")
+    parser.add_argument("--linker", help="Path to linker", dest="ld", metavar="PATH")
+    parser.add_argument("--tmpasm", help="Path for intermidiate assembly output", dest="assembly", metavar="PATH")
+    parser.add_argument("--tmpobj", help="Path for intermidiate object file", dest="object", metavar="PATH")
     parser.add_argument("-V", "--verbose", help="Print all info", action="store_true")
     parser.add_argument("--dump-parents", help="Dump all parents of text nodes in presentation", action="store_true", dest="dump_parents")
     parser.add_argument("--dump-paths", help="Dump all parents of text nodes in presentation", action="store_true", dest="dump_paths")
     parser.add_argument("--run", help="Run executable after assembling", action="store_true")
+    parser.add_argument("--prelude", help="Path to prelude (default the same directory as transpiler", metavar="PATH")
+    parser.add_argument("--no-prelude", help="Don't include prelude", action="store_true", dest="no_prelude")
     args = parser.parse_args()
 
     if args.output   is None: args.output   = replace_extension(args.source, Exe_Suffix)
@@ -167,6 +173,7 @@ if __name__ == "__main__":
     if args.object   is None: args.object   = replace_extension(args.source, ".o")
     if args.nasm     is None: args.nasm     = "nasm"
     if args.ld       is None: args.ld       = "ld"
+    if args.prelude  is None: args.prelude = os.path.join(os.path.dirname(__file__), "prelude.nasm")
     Verbose = args.verbose
 
     if args.dump_parents:
@@ -178,4 +185,4 @@ if __name__ == "__main__":
         if args.run:
             if not os.path.isabs(args.output):
                 args.output = os.path.join(".", args.output)
-            cmd(args.output)
+            exit(cmd(args.output).returncode)
