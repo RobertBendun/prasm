@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from odf.opendocument import load
-from odf import text, teletype
+from odf import text, teletype, draw
 from odf.element import Element
 import os.path
 import platform
@@ -9,9 +9,11 @@ import shutil
 import struct
 import subprocess
 import sys
+import zipfile
 
 Page_Attribute = ('urn:oasis:names:tc:opendocument:xmlns:drawing:1.0', 'name')
 Class_Attribute = ('urn:oasis:names:tc:opendocument:xmlns:presentation:1.0', 'class')
+Href_Attribute = ('http://www.w3.org/1999/xlink', 'href')
 
 # Calculate platform bitness based on size of a pointer
 # If result is weird default to 32 bits
@@ -56,10 +58,16 @@ def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: st
             if current_label not in order:
                 order.append(current_label)
                 mangled_label_to_original[current_label] = page_text
+            img = find_image(source, page)
+            if img is not None:
+                append(to_binary(img))
 
         if match_parent_node(page, 'draw:custom-shape'):
             verbose(f"Appending binary data to label {current_label}")
-            append(to_binary(page_text))
+            if page_text:
+                append(to_binary(page_text))
+            else:
+                append(to_binary('\n'))
 
     with open(assembly, 'w') as out:
         print("BITS 64\nglobal _start", file=out)
@@ -70,15 +78,33 @@ def main(source: str, output: str, assembly: str, nasm: str, object: str, ld: st
 
         for label in order:
             if label in labels:
-                print(f"{label}:\n{labels[label]}\n{label}$end equ $-{label}", file=out)
+                print(f"{label}:\n{labels[label]}\n{label}$len equ $-{label}", file=out)
             else:
                 print(f"[WARNING] Skipping empty label '{mangled_label_to_original[label]}'")
 
     cmd(nasm, "-f", Target, "-o", object, assembly)
     cmd(ld, "-o", output, object)
 
-def to_binary(s: str) -> str:
-    return 'db ' + ','.join(map(hex, bytes(s, 'utf8')))
+def to_binary(s: str | bytes) -> str:
+    if isinstance(s, str):
+        s = bytes(s, 'utf8')
+    return 'db ' + ','.join(map(hex, s))
+
+def find_image(source: str, node: Element) -> bytes | None:
+    while node.tagName != "draw:page" and node.parentNode:
+        node = node.parentNode
+
+    assert node.tagName == "draw:page", "This should be always true"
+    for child in traverse_children(node):
+        if child.tagName == "draw:image":
+            path = child.attributes[Href_Attribute]
+            return read_file_from(source, path)
+    return None
+
+def traverse_children(node: Element):
+    for child in node.childNodes:
+        yield child
+        yield from traverse_children(child)
 
 def dump_parents(source: str):
     pres = load(source)
@@ -96,6 +122,10 @@ def dump_parents(source: str):
             print("Text:", teletype.extractText(p))
             print()
 
+def read_file_from(presentation: str, sub_path: str) -> bytes:
+    with zipfile.ZipFile(presentation) as zip:
+        return zip.read(sub_path)
+
 def dump_paths(source: str):
     pres = load(source)
     for page in pres.getElementsByType(text.P):
@@ -105,7 +135,7 @@ def dump_paths(source: str):
         print("Path:", get_path_of(page))
 
 def mangle_label(label: str) -> str:
-    return label
+    return label.lower()
 
 def iterate_parents(node: Element):
     while node.parentNode:
@@ -155,6 +185,7 @@ if __name__ == "__main__":
     from argparse import ArgumentParser
     parser = ArgumentParser(description="Assembler of PRASM assembly language")
     parser.add_argument("source", help="Source file that will be assembled")
+    parser.add_argument("args", help="Arguments to pass when running", nargs="*")
     parser.add_argument("--output", "-o", help="Target assembly file", metavar="PATH")
     parser.add_argument("--nasm", help="Path to NASM", metavar="PATH")
     parser.add_argument("--linker", help="Path to linker", dest="ld", metavar="PATH")
@@ -181,8 +212,8 @@ if __name__ == "__main__":
     elif args.dump_paths:
         dump_paths(source=args.source)
     else:
-        main(**dict(k for k in vars(args).items() if k[0] not in ['verbose', 'dump_parents', 'dump_paths', 'run'] ))
+        main(**dict(k for k in vars(args).items() if k[0] not in ['verbose', 'dump_parents', 'dump_paths', 'run', 'args'] ))
         if args.run:
             if not os.path.isabs(args.output):
                 args.output = os.path.join(".", args.output)
-            exit(cmd(args.output).returncode)
+            exit(cmd(args.output, *args.args).returncode)
